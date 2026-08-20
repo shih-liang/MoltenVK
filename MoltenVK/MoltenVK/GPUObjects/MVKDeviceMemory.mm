@@ -25,6 +25,7 @@
 #include <cstdlib>
 #include <stdlib.h>
 #include <os/lock.h>
+#include <unistd.h>
 
 using namespace std;
 
@@ -224,7 +225,12 @@ bool MVKDeviceMemory::ensureMTLHeap() {
 	// For now, use tracked resources. Later, we should probably default
 	// to untracked, since Vulkan uses explicit barriers anyway.
 	heapDesc.hazardTrackingMode = MTLHazardTrackingModeTracked;
-	heapDesc.size = _allocationSize;
+	// VZVirtioSharedMemoryRegion maps at the macOS VM-page granule. Keep
+	// Vulkan's logical allocation size unchanged, but make the exported
+	// Metal heap own the complete final page so a guest cannot observe an
+	// adjacent host allocation through transport padding.
+	heapDesc.size = mvkAlignByteCount(_allocationSize,
+	                                  (VkDeviceSize)getpagesize());
 	_mtlHeap = [getMTLDevice() newHeapWithDescriptor: heapDesc];	// retained
 	[heapDesc release];
 	if (!_mtlHeap) { return false; }
