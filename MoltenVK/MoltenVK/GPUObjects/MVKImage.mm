@@ -32,6 +32,8 @@
 using namespace std;
 using namespace SPIRV_CROSS_NAMESPACE;
 
+extern "C" void np_mvk_associate_heap_render_texture(void* heap, void* texture);
+
 #pragma mark -
 #pragma mark MVKImagePlane
 
@@ -94,6 +96,12 @@ id<MTLTexture> MVKImagePlane::getMTLTexture() {
             _image->_device->getLiveResources().add(tex);
         }
         _mtlTexture = tex;
+		// NativePipe diagnostics and scanout must observe the exact texture that
+		// MoltenVK rendered, not a separately reconstructed view whose inferred
+		// offset or row pitch can diverge from this image plane.
+		if (dvcMem && dvcMem->getMTLHeap() && memoryBinding->_mtlTexelBuffer) {
+			np_mvk_associate_heap_render_texture(dvcMem->getMTLHeap(), tex);
+		}
 
         [mtlTexDesc release];                                            // temp release
         propagateDebugName();
@@ -113,6 +121,11 @@ id<MTLTexture> MVKImagePlane::getMTLTexture(MTLPixelFormat mtlPixFmt) {
         mtlTex = _mtlTextureViews[mtlPixFmt];
         if ( !mtlTex ) {
             mtlTex = [baseTexture newTextureViewWithPixelFormat: mtlPixFmt];    // retained
+            // Argument-buffer references are not made resident implicitly when
+            // the device uses an MTLResidencySet. Track texture views too.
+            if (mtlTex && mtlTex.storageMode != MTLStorageModeMemoryless) {
+                _image->_device->makeResident(mtlTex);
+            }
             _image->_device->getLiveResources().add(mtlTex);
             _mtlTextureViews[mtlPixFmt] = mtlTex;
         }
@@ -131,6 +144,9 @@ void MVKImagePlane::releaseMTLTexture() {
     }
 
     for (auto& elem : _mtlTextureViews) {
+        if (elem.second.storageMode != MTLStorageModeMemoryless) {
+            dev->removeResidency(elem.second);
+        }
         live.remove(elem.second);
         [elem.second release];
     }
@@ -1850,6 +1866,11 @@ id<MTLTexture> MVKImageViewPlane::getMTLTexture() {
             if (_mtlTexture) { return _mtlTexture; }
 
             id<MTLTexture> tex = newMTLTexture(); // retained
+            // The base image is already resident, but its MTLTexture view is a
+            // separate allocation from the residency set's perspective.
+            if (tex && tex.storageMode != MTLStorageModeMemoryless) {
+                getDevice()->makeResident(tex);
+            }
             getDevice()->getLiveResources().add(tex);
             _mtlTexture = tex;
 
@@ -2109,6 +2130,9 @@ VkResult MVKImageViewPlane::initSwizzledMTLPixelFormat(const VkImageViewCreateIn
 
 MVKImageViewPlane::~MVKImageViewPlane() {
 	if (id<MTLTexture> tex = _mtlTexture) {
+		if (tex.storageMode != MTLStorageModeMemoryless) {
+			getDevice()->removeResidency(tex);
+		}
 		getDevice()->getLiveResources().remove(tex);
 		[tex release];
 	}
