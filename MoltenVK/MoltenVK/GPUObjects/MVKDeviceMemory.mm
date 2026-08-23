@@ -23,61 +23,10 @@
 #include "mvk_datatypes.hpp"
 #include "MVKFoundation.h"
 #include <cstdlib>
-#include <stdio.h>
 #include <stdlib.h>
-#include <objc/runtime.h>
 #include <os/lock.h>
-#include <unistd.h>
 
 using namespace std;
-
-// Venus exports VkDeviceMemory as an MTLHeap, but a linear VkImage in that
-// allocation is actually backed by MVKDeviceMemory's MTLBuffer.  A scanout
-// consumer must make a texture view of this exact buffer; allocating another
-// overlapping buffer from the placement heap invalidates the buffer that
-// MoltenVK continues to use when the swapchain image rotates back in.
-//
-// Keep a non-retaining association: MVKDeviceMemory already owns both objects
-// for the same lifetime.  The exported accessor retains the returned buffer so
-// a caller can safely create a view before releasing it.
-static char kNativePipeHeapBackingBufferKey;
-static char kNativePipeHeapRenderTextureKey;
-
-static void mvkAssociateHeapBackingBuffer(id<MTLHeap> heap, id<MTLBuffer> buffer) {
-	if (!heap) { return; }
-	objc_setAssociatedObject(heap, &kNativePipeHeapBackingBufferKey, buffer,
-						 OBJC_ASSOCIATION_ASSIGN);
-}
-
-extern "C" __attribute__((visibility("default")))
-void* np_mvk_retain_heap_backing_buffer(void* heap) {
-	if (!heap) { return nullptr; }
-	id<MTLBuffer> buffer = (id<MTLBuffer>)objc_getAssociatedObject(
-		(id)heap, &kNativePipeHeapBackingBufferKey);
-	return [buffer retain];
-}
-
-extern "C" __attribute__((visibility("default")))
-void np_mvk_associate_heap_render_texture(void* heap, void* texture) {
-	if (!heap) { return; }
-	if (getenv("NATIVEPIPE_MVK_ASSOC_TRACE")) {
-		id<MTLTexture> mtlTexture = (id<MTLTexture>)texture;
-		fprintf(stderr, "[mvk] associate heap=%p texture=%p %lux%lu format=%lu\n",
-		        heap, texture, (unsigned long)mtlTexture.width,
-		        (unsigned long)mtlTexture.height,
-		        (unsigned long)mtlTexture.pixelFormat);
-	}
-	objc_setAssociatedObject((id)heap, &kNativePipeHeapRenderTextureKey,
-						 (id)texture, OBJC_ASSOCIATION_ASSIGN);
-}
-
-extern "C" __attribute__((visibility("default")))
-void* np_mvk_retain_heap_render_texture(void* heap) {
-	if (!heap) { return nullptr; }
-	id<MTLTexture> texture = (id<MTLTexture>)objc_getAssociatedObject(
-		(id)heap, &kNativePipeHeapRenderTextureKey);
-	return [texture retain];
-}
 
 
 #pragma mark MVKDeviceMemory
@@ -275,12 +224,7 @@ bool MVKDeviceMemory::ensureMTLHeap() {
 	// For now, use tracked resources. Later, we should probably default
 	// to untracked, since Vulkan uses explicit barriers anyway.
 	heapDesc.hazardTrackingMode = MTLHazardTrackingModeTracked;
-	// VZVirtioSharedMemoryRegion maps at the macOS VM-page granule. Keep
-	// Vulkan's logical allocation size unchanged, but make the exported
-	// Metal heap own the complete final page so a guest cannot observe an
-	// adjacent host allocation through transport padding.
-	heapDesc.size = mvkAlignByteCount(_allocationSize,
-	                                  (VkDeviceSize)getpagesize());
+	heapDesc.size = _allocationSize;
 	_mtlHeap = [getMTLDevice() newHeapWithDescriptor: heapDesc];	// retained
 	[heapDesc release];
 	if (!_mtlHeap) { return false; }
@@ -294,10 +238,7 @@ bool MVKDeviceMemory::ensureMTLHeap() {
 // creating the MTLBuffer if needed, and returns whether it was successful.
 bool MVKDeviceMemory::ensureMTLBuffer() {
 
-	if (_mtlBuffer) {
-		mvkAssociateHeapBackingBuffer(_mtlHeap, _mtlBuffer);
-		return true;
-	}
+	if (_mtlBuffer) { return true; }
 
 	NSUInteger memLen = mvkAlignByteCount(_allocationSize, getMetalFeatures().mtlBufferAlignment);
 
@@ -328,7 +269,6 @@ bool MVKDeviceMemory::ensureMTLBuffer() {
 	_device->getLiveResources().add(buf);
 	_pMemory = isMemoryHostAccessible() ? buf.contents : nullptr;
 	_mtlBuffer = buf;
-	mvkAssociateHeapBackingBuffer(_mtlHeap, _mtlBuffer);
 
 	propagateDebugName();
 
@@ -561,16 +501,6 @@ MVKDeviceMemory::~MVKDeviceMemory() {
 	for (auto& buf : _buffers)             { buf->_deviceMemory = nullptr; }
 	for (auto& img : _imageMemoryBindings) { img->_deviceMemory = nullptr; }
 	os_unfair_lock_unlock(&s_device_memory_destruction_lock);
-
-	// Clear the weak heap association before either object can be released.
-	// The host retains any buffer returned by the exported accessor.
-	if (_mtlHeap && objc_getAssociatedObject(
-			_mtlHeap, &kNativePipeHeapBackingBufferKey) == _mtlBuffer) {
-		mvkAssociateHeapBackingBuffer(_mtlHeap, nil);
-	}
-	if (_mtlHeap) {
-		np_mvk_associate_heap_render_texture(_mtlHeap, nil);
-	}
 
 	if (_externalMemoryHandleType & VK_EXTERNAL_MEMORY_HANDLE_TYPE_MTLTEXTURE_BIT_EXT) {
 		[_mtlTexture release];

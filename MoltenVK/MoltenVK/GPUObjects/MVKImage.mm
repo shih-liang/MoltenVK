@@ -28,12 +28,9 @@
 
 #import "MTLSamplerDescriptor+MoltenVK.h"
 #import "CAMetalLayer+MoltenVK.h"
-#import <IOSurface/IOSurface.h>
 
 using namespace std;
 using namespace SPIRV_CROSS_NAMESPACE;
-
-extern "C" void np_mvk_associate_heap_render_texture(void* heap, void* texture);
 
 #pragma mark -
 #pragma mark MVKImagePlane
@@ -97,12 +94,6 @@ id<MTLTexture> MVKImagePlane::getMTLTexture() {
             _image->_device->getLiveResources().add(tex);
         }
         _mtlTexture = tex;
-		// NativePipe diagnostics and scanout must observe the exact texture that
-		// MoltenVK rendered, not a separately reconstructed view whose inferred
-		// offset or row pitch can diverge from this image plane.
-		if (dvcMem && dvcMem->getMTLHeap() && memoryBinding->_mtlTexelBuffer) {
-			np_mvk_associate_heap_render_texture(dvcMem->getMTLHeap(), tex);
-		}
 
         [mtlTexDesc release];                                            // temp release
         propagateDebugName();
@@ -1241,17 +1232,6 @@ MVKImage::MVKImage(MVKDevice* device, const VkImageCreateInfo* pCreateInfo) : MV
 	_isDepthStencilAttachment = (mvkAreAllFlagsEnabled(pCreateInfo->usage, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) ||
 								 mvkAreAllFlagsEnabled(pixFmts->getVkFormatProperties3(pCreateInfo->format).optimalTilingFeatures, VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT));
 	_rowByteAlignment = _isLinear || _isLinearForAtomics ? _device->getVkFormatTexelBufferAlignment(pCreateInfo->format, this) : mvkEnsurePowerOfTwo(pixFmts->getBytesPerBlock(pCreateInfo->format));
-	// NativePipe exports linear images as IOSurfaces.  Their row alignment is
-	// stricter than Metal's texel-buffer alignment on Apple Silicon.  Report
-	// that layout from vkGetImageSubresourceLayout from the start; changing the
-	// stride only when the IOSurface is created makes every row after the first
-	// address different bytes and produces resize-width-dependent stripes.
-	if (_isLinear) {
-		_rowByteAlignment = std::max(
-			_rowByteAlignment,
-			(VkDeviceSize)IOSurfaceAlignProperty(kIOSurfaceBytesPerRow, 1));
-	}
-
     VkExtent2D blockTexelSizeOfPlane[3];
     uint32_t bytesPerBlockOfPlane[3];
     MTLPixelFormat mtlPixFmtOfPlane[3];
