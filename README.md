@@ -15,6 +15,11 @@ Copyright (c) 2015-2025 [The Brenwill Workshop Ltd.](http://www.brenwill.com)
 ![Build Status](https://github.com/KhronosGroup/MoltenVK/workflows/CI/badge.svg)
 
 
+<img src="Docs/preview.png" width="1000" alt="Illustrative Vulkan application window and its MoltenVK to Apple Metal rendering path">
+
+*Illustrative preview, sample data. An application using the rendering library; MoltenVK is not a standalone control application.*
+
+
 Table of Contents
 -----------------
 
